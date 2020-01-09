@@ -1,12 +1,11 @@
 Name: librdmacm
 Version: 1.0.19.1
-Release: 1.1%{?dist}
+Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
 License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
 Source: http://www.openfabrics.org/downloads/rdmacm/%{name}-%{version}.tar.gz
-Patch0:	cma.c.nofprintf.patch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 ExcludeArch: s390 s390x
 BuildRequires: libibverbs-devel >= 1.1, chrpath, ibacm-devel >= 1.0.8
@@ -39,7 +38,6 @@ Example test programs for the librdmacm library.
 
 %prep
 %setup -q -n %{name}-%{version}
-%patch0 -p1
 
 %build
 %configure --with-ib_acm
@@ -87,10 +85,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/*
 
 %changelog
-* Thu Jan 07 2016 Donald Dutile <ddutile@redhat.com> - 1.0.19.1-1.1
-- Silence warning/errors messages to stderr when RDMA hw not installed
-- Resolves: bz1296408
-
 * Wed Mar 11 2015 Doug Ledford <dledford@redhat.com> - 1.0.19.1-1
 - Update to latest upstream release
 - Drop patches that upstream has folded in
