@@ -1,6 +1,6 @@
 Name: librdmacm
-Version: 1.0.19.1
-Release: 1%{?dist}
+Version: 1.0.21
+Release: 0%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
 License: GPLv2 or BSD
@@ -85,6 +85,14 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/*
 
 %changelog
+* Thu Mar 03 2016 Donald Dutile <ddutile@redhat.com> - 1.0.21
+- Update to latest upstream release
+- Resolves: bz1119108
+
+* Tue Jan 05 2016 Donald Dutile <ddutile@redhat.com> - 1.0.19.1-2
+- Silence warning/errors messages to stderr when RDMA hw not installed
+- Resolves: bz1231766
+
 * Wed Mar 11 2015 Doug Ledford <dledford@redhat.com> - 1.0.19.1-1
 - Update to latest upstream release
 - Drop patches that upstream has folded in

@@ -277,15 +277,20 @@ static int rping_cq_event_handler(struct rping_cb *cb)
 	struct ibv_wc wc;
 	struct ibv_recv_wr *bad_wr;
 	int ret;
+	int flushed = 0;
 
 	while ((ret = ibv_poll_cq(cb->cq, 1, &wc)) == 1) {
 		ret = 0;
 
 		if (wc.status) {
-			if (wc.status != IBV_WC_WR_FLUSH_ERR)
-				fprintf(stderr,
-					"cq completion failed status %d\n",
-					wc.status);
+			if (wc.status == IBV_WC_WR_FLUSH_ERR) {
+				flushed = 1;
+				continue;
+
+			}
+			fprintf(stderr,
+				"cq completion failed status %d\n",
+				wc.status);
 			ret = -1;
 			goto error;
 		}
@@ -334,7 +339,7 @@ static int rping_cq_event_handler(struct rping_cb *cb)
 		fprintf(stderr, "poll error %d\n", ret);
 		goto error;
 	}
-	return 0;
+	return flushed;
 
 error:
 	cb->state = ERROR;
@@ -788,7 +793,11 @@ static void *rping_persistent_server_thread(void *arg)
 		goto err2;
 	}
 
-	pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	ret = pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	if (ret) {
+		perror("pthread_create");
+		goto err2;
+	}
 
 	ret = rping_accept(cb);
 	if (ret) {
@@ -820,10 +829,26 @@ static int rping_run_persistent_server(struct rping_cb *listening_cb)
 {
 	int ret;
 	struct rping_cb *cb;
+	pthread_attr_t attr;
 
 	ret = rping_bind_server(listening_cb);
 	if (ret)
 		return ret;
+
+	/*
+	 * Set persistent server threads to DEATCHED state so
+	 * they release all their resources when they exit.
+	 */
+	ret = pthread_attr_init(&attr);
+	if (ret) {
+		perror("pthread_attr_init");
+		return ret;
+	}
+	ret = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	if (ret) {
+		perror("pthread_attr_setdetachstate");
+		return ret;
+	}
 
 	while (1) {
 		sem_wait(&listening_cb->sem);
@@ -836,7 +861,12 @@ static int rping_run_persistent_server(struct rping_cb *listening_cb)
 		cb = clone_cb(listening_cb);
 		if (!cb)
 			return -1;
-		pthread_create(&cb->persistent_server_thread, NULL, rping_persistent_server_thread, cb);
+
+		ret = pthread_create(&cb->persistent_server_thread, &attr, rping_persistent_server_thread, cb);
+		if (ret) {
+			perror("pthread_create");
+			return ret;
+		}
 	}
 	return 0;
 }
@@ -875,7 +905,11 @@ static int rping_run_server(struct rping_cb *cb)
 		goto err2;
 	}
 
-	pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	ret = pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	if (ret) {
+		perror("pthread_create");
+		goto err2;
+	}
 
 	ret = rping_accept(cb);
 	if (ret) {
@@ -1050,23 +1084,28 @@ static int rping_run_client(struct rping_cb *cb)
 		goto err2;
 	}
 
-	pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	ret = pthread_create(&cb->cqthread, NULL, cq_thread, cb);
+	if (ret) {
+		perror("pthread_create");
+		goto err2;
+	}
 
 	ret = rping_connect_client(cb);
 	if (ret) {
 		fprintf(stderr, "connect error %d\n", ret);
-		goto err2;
+		goto err3;
 	}
 
 	ret = rping_test_client(cb);
 	if (ret) {
 		fprintf(stderr, "rping client failed: %d\n", ret);
-		goto err3;
+		goto err4;
 	}
 
 	ret = 0;
-err3:
+err4:
 	rdma_disconnect(cb->cm_id);
+err3:
 	pthread_join(cb->cqthread, NULL);
 err2:
 	rping_free_buffers(cb);
@@ -1216,7 +1255,11 @@ int main(int argc, char *argv[])
 	}
 	DEBUG_LOG("created cm_id %p\n", cb->cm_id);
 
-	pthread_create(&cb->cmthread, NULL, cm_thread, cb);
+	ret = pthread_create(&cb->cmthread, NULL, cm_thread, cb);
+	if (ret) {
+		perror("pthread_create");
+		goto out2;
+	}
 
 	if (cb->server) {
 		if (persistent_server)

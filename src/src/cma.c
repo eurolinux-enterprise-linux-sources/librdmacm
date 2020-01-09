@@ -49,6 +49,7 @@
 #include <stddef.h>
 #include <netdb.h>
 #include <syslog.h>
+#include <limits.h>
 
 #include "cma.h"
 #include "indexer.h"
@@ -73,10 +74,15 @@ do {						\
 	(req)->response = (uintptr_t) (resp);	\
 } while (0)
 
+struct cma_port {
+	uint8_t			link_layer;
+};
+
 struct cma_device {
 	struct ibv_context *verbs;
 	struct ibv_pd	   *pd;
 	struct ibv_xrcd    *xrcd;
+	struct cma_port    *port;
 	uint64_t	    guid;
 	int		    port_cnt;
 	int		    refcnt;
@@ -142,6 +148,7 @@ static void ucma_cleanup(void)
 			if (cma_dev_array[cma_dev_cnt].refcnt)
 				ibv_dealloc_pd(cma_dev_array[cma_dev_cnt].pd);
 			ibv_close_device(cma_dev_array[cma_dev_cnt].verbs);
+			free(cma_dev_array[cma_dev_cnt].port);
 			cma_init_cnt--;
 		}
 
@@ -166,17 +173,12 @@ static int check_abi_version(void)
 		 * backports, assume the most recent version of the ABI.  If
 		 * we're wrong, we'll simply fail later when calling the ABI.
 		 */
-		fprintf(stderr, PFX "Warning: couldn't read ABI version.\n");
-		fprintf(stderr, PFX "Warning: assuming: %d\n", abi_ver);
 		return 0;
 	}
 
 	abi_ver = strtol(value, NULL, 10);
 	if (abi_ver < RDMA_USER_CM_MIN_ABI_VERSION ||
 	    abi_ver > RDMA_USER_CM_MAX_ABI_VERSION) {
-		fprintf(stderr, PFX "Fatal: kernel ABI version %d "
-				"doesn't match library version %d.\n",
-				abi_ver, RDMA_USER_CM_MAX_ABI_VERSION);
 		return -1;
 	}
 	return 0;
@@ -230,13 +232,11 @@ int ucma_init(void)
 
 	dev_list = ibv_get_device_list(&dev_cnt);
 	if (!dev_list) {
-		fprintf(stderr, PFX "Fatal: unable to get RDMA device list\n");
 		ret = ERR(ENODEV);
 		goto err1;
 	}
 
 	if (!dev_cnt) {
-		fprintf(stderr, PFX "Fatal: no RDMA devices found\n");
 		ret = ERR(ENODEV);
 		goto err2;
 	}
@@ -272,7 +272,6 @@ static struct ibv_context *ucma_open_device(uint64_t guid)
 
 	dev_list = ibv_get_device_list(NULL);
 	if (!dev_list) {
-		fprintf(stderr, PFX "Fatal: unable to get RDMA device list\n");
 		return NULL;
 	}
 
@@ -283,17 +282,15 @@ static struct ibv_context *ucma_open_device(uint64_t guid)
 		}
 	}
 
-	if (!verbs)
-		fprintf(stderr, PFX "Fatal: unable to open RDMA device\n");
-
 	ibv_free_device_list(dev_list);
 	return verbs;
 }
 
 static int ucma_init_device(struct cma_device *cma_dev)
 {
+	struct ibv_port_attr port_attr;
 	struct ibv_device_attr attr;
-	int ret;
+	int i, ret;
 
 	if (cma_dev->verbs)
 		return 0;
@@ -304,9 +301,21 @@ static int ucma_init_device(struct cma_device *cma_dev)
 
 	ret = ibv_query_device(cma_dev->verbs, &attr);
 	if (ret) {
-		fprintf(stderr, PFX "Fatal: unable to query RDMA device\n");
 		ret = ERR(ret);
 		goto err;
+	}
+
+	cma_dev->port = malloc(sizeof *cma_dev->port * attr.phys_port_cnt);
+	if (!cma_dev->port) {
+		ret = ERR(ENOMEM);
+		goto err;
+	}
+
+	for (i = 1; i <= attr.phys_port_cnt; i++) {
+		if (ibv_query_port(cma_dev->verbs, i, &port_attr))
+			cma_dev->port[i - 1].link_layer = IBV_LINK_LAYER_UNSPECIFIED;
+		else
+			cma_dev->port[i - 1].link_layer = port_attr.link_layer;
 	}
 
 	cma_dev->port_cnt = attr.phys_port_cnt;
@@ -389,7 +398,6 @@ struct rdma_event_channel *rdma_create_event_channel(void)
 
 	channel->fd = open("/dev/infiniband/rdma_cm", O_RDWR | O_CLOEXEC);
 	if (channel->fd < 0) {
-		fprintf(stderr, PFX "Fatal: unable to open /dev/infiniband/rdma_cm\n");
 		goto err;
 	}
 	return channel;
@@ -1034,8 +1042,10 @@ static int rdma_init_qp_attr(struct rdma_cm_id *id, struct ibv_qp_attr *qp_attr,
 
 static int ucma_modify_qp_rtr(struct rdma_cm_id *id, uint8_t resp_res)
 {
+	struct cma_id_private *id_priv;
 	struct ibv_qp_attr qp_attr;
 	int qp_attr_mask, ret;
+	uint8_t link_layer;
 
 	if (!id->qp)
 		return ERR(EINVAL);
@@ -1054,6 +1064,16 @@ static int ucma_modify_qp_rtr(struct rdma_cm_id *id, uint8_t resp_res)
 	ret = rdma_init_qp_attr(id, &qp_attr, &qp_attr_mask);
 	if (ret)
 		return ret;
+
+	/*
+	 * Workaround for rdma_ucm kernel bug:
+	 * mask off qp_attr_mask bits 21-24 which are used for RoCE
+	 */
+	id_priv = container_of(id, struct cma_id_private, id);
+	link_layer = id_priv->cma_dev->port[id->port_num - 1].link_layer;
+
+	if (link_layer == IBV_LINK_LAYER_INFINIBAND)
+		qp_attr_mask &= UINT_MAX ^ 0xe00000;
 
 	if (resp_res != RDMA_MAX_RESP_RES)
 		qp_attr.max_dest_rd_atomic = resp_res;
