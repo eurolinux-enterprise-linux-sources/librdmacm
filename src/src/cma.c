@@ -328,7 +328,7 @@ struct rdma_event_channel *rdma_create_event_channel(void)
 	if (!channel)
 		return NULL;
 
-	channel->fd = open("/dev/infiniband/rdma_cm", O_RDWR);
+	channel->fd = open("/dev/infiniband/rdma_cm", O_RDWR | O_CLOEXEC);
 	if (channel->fd < 0) {
 		fprintf(stderr, PFX "Fatal: unable to open /dev/infiniband/rdma_cm\n");
 		goto err;
@@ -753,7 +753,10 @@ static int rdma_bind_addr2(struct rdma_cm_id *id, struct sockaddr *addr,
 	if (ret != sizeof cmd)
 		return (ret >= 0) ? ERR(ENODATA) : -1;
 
-	return ucma_query_addr(id);
+	ret = ucma_query_addr(id);
+	if (!ret)
+		ret = ucma_query_gid(id);
+	return ret;
 }
 
 int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr)
@@ -1175,11 +1178,9 @@ err:
 int rdma_create_srq(struct rdma_cm_id *id, struct ibv_pd *pd,
 		    struct ibv_srq_init_attr *attr)
 {
-	struct cma_id_private *id_priv;
 	struct ibv_srq *srq;
 	int ret;
 
-	id_priv = container_of(id, struct cma_id_private, id);
 	if (!pd)
 		pd = id->pd;
 
@@ -1545,22 +1546,25 @@ int rdma_notify(struct rdma_cm_id *id, enum ibv_event_type event)
 	return 0;
 }
 
+int ucma_shutdown(struct rdma_cm_id *id)
+{
+	switch (id->verbs->device->transport_type) {
+	case IBV_TRANSPORT_IB:
+		return ucma_modify_qp_err(id);
+	case IBV_TRANSPORT_IWARP:
+		return ucma_modify_qp_sqd(id);
+	default:
+		return ERR(EINVAL);
+	}
+}
+
 int rdma_disconnect(struct rdma_cm_id *id)
 {
 	struct ucma_abi_disconnect cmd;
 	struct cma_id_private *id_priv;
 	int ret;
 
-	switch (id->verbs->device->transport_type) {
-	case IBV_TRANSPORT_IB:
-		ret = ucma_modify_qp_err(id);
-		break;
-	case IBV_TRANSPORT_IWARP:
-		ret = ucma_modify_qp_sqd(id);
-		break;
-	default:
-		ret = ERR(EINVAL);
-	}
+	ret = ucma_shutdown(id);
 	if (ret)
 		return ret;
 

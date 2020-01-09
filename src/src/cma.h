@@ -150,6 +150,7 @@ void ucma_set_sid(enum rdma_port_space ps, struct sockaddr *addr,
 		  struct sockaddr_ib *sib);
 int ucma_max_qpsize(struct rdma_cm_id *id);
 int ucma_complete(struct rdma_cm_id *id);
+int ucma_shutdown(struct rdma_cm_id *id);
 
 static inline int ERR(int err)
 {
@@ -162,15 +163,9 @@ extern int af_ib_support;
 
 #define RAI_ROUTEONLY		0x01000000
 
-#ifdef USE_IB_ACM
 void ucma_ib_init();
 void ucma_ib_cleanup();
 void ucma_ib_resolve(struct rdma_addrinfo **rai, struct rdma_addrinfo *hints);
-#else
-#define ucma_ib_init()
-#define ucma_ib_cleanup()
-#define ucma_ib_resolve(x, y)
-#endif
 
 /* Define path record definition if using older version of libibverbs */
 #ifdef DEFINE_PATH_RECORD
@@ -211,6 +206,18 @@ struct ibv_path_data
 	struct ibv_path_record path;
 };
 #endif
+
+struct ib_connect_hdr {
+	uint8_t  cma_version;
+	uint8_t  ip_version; /* IP version: 7:4 */
+	uint16_t port;
+	uint32_t src_addr[4];
+	uint32_t dst_addr[4];
+#define cma_src_ip4 src_addr[3]
+#define cma_src_ip6 src_addr[0]
+#define cma_dst_ip4 dst_addr[3]
+#define cma_dst_ip6 dst_addr[0]
+};
 
 #ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"

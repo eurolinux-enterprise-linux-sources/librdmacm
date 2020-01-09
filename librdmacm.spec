@@ -1,15 +1,19 @@
 Name: librdmacm
-Version: 1.0.17
+Version: 1.0.18.1
 Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
 License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
 Source: http://www.openfabrics.org/downloads/rdmacm/%{name}-%{version}.tar.gz
-Patch0: librdmacm-1.0.17-use-mr.patch
+Patch0: 0001-cmtime-rework-program-to-be-multithread.patch
+Patch1: 0002-rdma_client-use-perror-unwind-allocs-on-failure.patch
+Patch2: 0003-rdma_server-use-perror-unwind-allocs-on-failure.patch
+Patch3: 0004-rdma_client-handle-IBV_SEND_INLINE-correctly.patch
+Patch4: 0005-rdma_server-handle-IBV_SEND_INLINE-correctly.patch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 ExcludeArch: s390 s390x
-BuildRequires: libibverbs-devel >= 1.1, chrpath, ibacm-devel >= 1.0.6
+BuildRequires: libibverbs-devel >= 1.1, chrpath, ibacm-devel >= 1.0.8
 
 %description
 librdmacm provides a userspace RDMA Communication Managment API.
@@ -39,7 +43,11 @@ Example test programs for the librdmacm library.
 
 %prep
 %setup -q -n %{name}-%{version}
-%patch0 -p1 -b .mreg
+%patch0 -p1
+%patch1 -p1
+%patch2 -p1
+%patch3 -p1
+%patch4 -p1
 
 %build
 %configure --with-ib_acm
@@ -87,6 +95,10 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/*
 
 %changelog
+* Tue Jun 17 2014 Doug Ledford <dledford@redhat.com> - 1.0.18.1-1
+- Update to latest upstream release
+- Related: bz1056662
+
 * Wed Aug 07 2013 Doug Ledford <dledford@redhat.com> - 1.0.17-1
 - Official 1.0.17 release
 - The fix to bug 866221 got kicked back as incomplete last time, fix
