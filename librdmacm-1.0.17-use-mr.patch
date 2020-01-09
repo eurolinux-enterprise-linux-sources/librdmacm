@@ -1,0 +1,108 @@
+diff -up librdmacm-1.0.17/examples/rdma_client.c.qlogic librdmacm-1.0.17/examples/rdma_client.c
+--- librdmacm-1.0.17/examples/rdma_client.c.qlogic	2013-03-05 20:31:33.000000000 -0500
++++ librdmacm-1.0.17/examples/rdma_client.c	2013-08-07 18:43:16.698312896 -0400
+@@ -39,7 +39,7 @@ static char *server = "127.0.0.1";
+ static char *port = "7471";
+ 
+ struct rdma_cm_id *id;
+-struct ibv_mr *mr;
++struct ibv_mr *recv_mr, *send_mr;
+ uint8_t send_msg[16];
+ uint8_t recv_msg[16];
+ 
+@@ -71,13 +71,19 @@ static int run(void)
+ 		return ret;
+ 	}
+ 
+-	mr = rdma_reg_msgs(id, recv_msg, 16);
+-	if (!mr) {
++	recv_mr = rdma_reg_msgs(id, recv_msg, 16);
++	if (!recv_mr) {
+ 		printf("rdma_reg_msgs %d\n", errno);
+ 		return ret;
+ 	}
+ 
+-	ret = rdma_post_recv(id, NULL, recv_msg, 16, mr);
++	send_mr = rdma_reg_msgs(id, send_msg, 16);
++	if (!send_mr) {
++		printf("rdma_reg_msgs %d\n", errno);
++		return ret;
++	}
++
++	ret = rdma_post_recv(id, NULL, recv_msg, 16, recv_mr);
+ 	if (ret) {
+ 		printf("rdma_post_recv %d\n", errno);
+ 		return ret;
+@@ -89,7 +95,7 @@ static int run(void)
+ 		return ret;
+ 	}
+ 
+-	ret = rdma_post_send(id, NULL, send_msg, 16, NULL, IBV_SEND_INLINE);
++	ret = rdma_post_send(id, NULL, send_msg, 16, send_mr, 0);
+ 	if (ret) {
+ 		printf("rdma_post_send %d\n", errno);
+ 		return ret;
+@@ -102,7 +108,8 @@ static int run(void)
+ 	}
+ 
+ 	rdma_disconnect(id);
+-	rdma_dereg_mr(mr);
++	rdma_dereg_mr(send_mr);
++	rdma_dereg_mr(recv_mr);
+ 	rdma_destroy_ep(id);
+ 	return 0;
+ }
+diff -up librdmacm-1.0.17/examples/rdma_server.c.qlogic librdmacm-1.0.17/examples/rdma_server.c
+--- librdmacm-1.0.17/examples/rdma_server.c.qlogic	2013-03-05 20:31:33.000000000 -0500
++++ librdmacm-1.0.17/examples/rdma_server.c	2013-08-07 18:43:22.592399715 -0400
+@@ -39,7 +39,7 @@
+ static char *port = "7471";
+ 
+ struct rdma_cm_id *listen_id, *id;
+-struct ibv_mr *mr;
++struct ibv_mr *send_mr, *recv_mr;
+ uint8_t send_msg[16];
+ uint8_t recv_msg[16];
+ 
+@@ -83,13 +83,19 @@ static int run(void)
+ 		return ret;
+ 	}
+ 
+-	mr = rdma_reg_msgs(id, recv_msg, 16);
+-	if (!mr) {
++	send_mr = rdma_reg_msgs(id, send_msg, 16);
++	if (!send_mr) {
+ 		printf("rdma_reg_msgs %d\n", errno);
+ 		return ret;
+ 	}
+ 
+-	ret = rdma_post_recv(id, NULL, recv_msg, 16, mr);
++	recv_mr = rdma_reg_msgs(id, recv_msg, 16);
++	if (!recv_mr) {
++		printf("rdma_reg_msgs %d\n", errno);
++		return ret;
++	}
++
++	ret = rdma_post_recv(id, NULL, recv_msg, 16, recv_mr);
+ 	if (ret) {
+ 		printf("rdma_post_recv %d\n", errno);
+ 		return ret;
+@@ -107,7 +113,7 @@ static int run(void)
+ 		return ret;
+ 	}
+ 
+-	ret = rdma_post_send(id, NULL, send_msg, 16, NULL, IBV_SEND_INLINE);
++	ret = rdma_post_send(id, NULL, send_msg, 16, send_mr, 0);
+ 	if (ret) {
+ 		printf("rdma_post_send %d\n", errno);
+ 		return ret;
+@@ -120,7 +126,8 @@ static int run(void)
+ 	}
+ 
+ 	rdma_disconnect(id);
+-	rdma_dereg_mr(mr);
++	rdma_dereg_mr(recv_mr);
++	rdma_dereg_mr(send_mr);
+ 	rdma_destroy_ep(id);
+ 	rdma_destroy_ep(listen_id);
+ 	return 0;
