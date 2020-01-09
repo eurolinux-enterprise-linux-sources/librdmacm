@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2012 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2005-2014 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -76,6 +76,7 @@ do {						\
 struct cma_device {
 	struct ibv_context *verbs;
 	struct ibv_pd	   *pd;
+	struct ibv_xrcd    *xrcd;
 	uint64_t	    guid;
 	int		    port_cnt;
 	int		    refcnt;
@@ -122,6 +123,7 @@ struct cma_event {
 
 static struct cma_device *cma_dev_array;
 static int cma_dev_cnt;
+static int cma_init_cnt;
 static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 static int abi_ver = RDMA_USER_CM_MAX_ABI_VERSION;
 int af_ib_support;
@@ -134,9 +136,13 @@ static void ucma_cleanup(void)
 
 	if (cma_dev_cnt) {
 		while (cma_dev_cnt--) {
+			if (!cma_dev_array[cma_dev_cnt].verbs)
+				continue;
+
 			if (cma_dev_array[cma_dev_cnt].refcnt)
 				ibv_dealloc_pd(cma_dev_array[cma_dev_cnt].pd);
 			ibv_close_device(cma_dev_array[cma_dev_cnt].verbs);
+			cma_init_cnt--;
 		}
 
 		fastlock_destroy(&idm_lock);
@@ -205,8 +211,6 @@ static void ucma_set_af_ib_support(void)
 int ucma_init(void)
 {
 	struct ibv_device **dev_list = NULL;
-	struct cma_device *cma_dev;
-	struct ibv_device_attr attr;
 	int i, ret, dev_cnt;
 
 	/* Quick check without lock to see if we're already initialized */
@@ -236,37 +240,15 @@ int ucma_init(void)
 		ret = ERR(ENODEV);
 		goto err2;
 	}
-		
-	cma_dev_array = calloc(dev_cnt, sizeof *cma_dev);
+
+	cma_dev_array = calloc(dev_cnt, sizeof *cma_dev_array);
 	if (!cma_dev_array) {
 		ret = ERR(ENOMEM);
 		goto err2;
 	}
 
-	for (i = 0; dev_list[i];) {
-		cma_dev = &cma_dev_array[i];
-
-		cma_dev->guid = ibv_get_device_guid(dev_list[i]);
-		cma_dev->verbs = ibv_open_device(dev_list[i]);
-		if (!cma_dev->verbs) {
-			fprintf(stderr, PFX "Fatal: unable to open RDMA device\n");
-			ret = ERR(ENODEV);
-			goto err3;
-		}
-
-		i++;
-		ret = ibv_query_device(cma_dev->verbs, &attr);
-		if (ret) {
-			fprintf(stderr, PFX "Fatal: unable to query RDMA device\n");
-			ret = ERR(ret);
-			goto err3;
-		}
-
-		cma_dev->port_cnt = attr.phys_port_cnt;
-		cma_dev->max_qpsize = attr.max_qp_wr;
-		cma_dev->max_initiator_depth = (uint8_t) attr.max_qp_init_rd_atom;
-		cma_dev->max_responder_resources = (uint8_t) attr.max_qp_rd_atom;
-	}
+	for (i = 0; dev_list[i]; i++)
+		cma_dev_array[i].guid = ibv_get_device_guid(dev_list[i]);
 
 	cma_dev_cnt = dev_cnt;
 	ucma_set_af_ib_support();
@@ -274,14 +256,91 @@ int ucma_init(void)
 	ibv_free_device_list(dev_list);
 	return 0;
 
-err3:
-	while (i--)
-		ibv_close_device(cma_dev_array[i].verbs);
-	free(cma_dev_array);
 err2:
 	ibv_free_device_list(dev_list);
 err1:
 	fastlock_destroy(&idm_lock);
+	pthread_mutex_unlock(&mut);
+	return ret;
+}
+
+static struct ibv_context *ucma_open_device(uint64_t guid)
+{
+	struct ibv_device **dev_list;
+	struct ibv_context *verbs = NULL;
+	int i;
+
+	dev_list = ibv_get_device_list(NULL);
+	if (!dev_list) {
+		fprintf(stderr, PFX "Fatal: unable to get RDMA device list\n");
+		return NULL;
+	}
+
+	for (i = 0; dev_list[i]; i++) {
+		if (ibv_get_device_guid(dev_list[i]) == guid) {
+			verbs = ibv_open_device(dev_list[i]);
+			break;
+		}
+	}
+
+	if (!verbs)
+		fprintf(stderr, PFX "Fatal: unable to open RDMA device\n");
+
+	ibv_free_device_list(dev_list);
+	return verbs;
+}
+
+static int ucma_init_device(struct cma_device *cma_dev)
+{
+	struct ibv_device_attr attr;
+	int ret;
+
+	if (cma_dev->verbs)
+		return 0;
+
+	cma_dev->verbs = ucma_open_device(cma_dev->guid);
+	if (!cma_dev->verbs)
+		return ERR(ENODEV);
+
+	ret = ibv_query_device(cma_dev->verbs, &attr);
+	if (ret) {
+		fprintf(stderr, PFX "Fatal: unable to query RDMA device\n");
+		ret = ERR(ret);
+		goto err;
+	}
+
+	cma_dev->port_cnt = attr.phys_port_cnt;
+	cma_dev->max_qpsize = attr.max_qp_wr;
+	cma_dev->max_initiator_depth = (uint8_t) attr.max_qp_init_rd_atom;
+	cma_dev->max_responder_resources = (uint8_t) attr.max_qp_rd_atom;
+	cma_init_cnt++;
+	return 0;
+
+err:
+	ibv_close_device(cma_dev->verbs);
+	cma_dev->verbs = NULL;
+	return ret;
+}
+
+static int ucma_init_all(void)
+{
+	int i, ret = 0;
+
+	if (!cma_dev_cnt) {
+		ret = ucma_init();
+		if (ret)
+			return ret;
+	}
+
+	if (cma_init_cnt == cma_dev_cnt)
+		return 0;
+
+	pthread_mutex_lock(&mut);
+	for (i = 0; i < cma_dev_cnt; i++) {
+		ret = ucma_init_device(&cma_dev_array[i]);
+		if (ret)
+			break;
+	}
 	pthread_mutex_unlock(&mut);
 	return ret;
 }
@@ -291,7 +350,7 @@ struct ibv_context **rdma_get_devices(int *num_devices)
 	struct ibv_context **devs = NULL;
 	int i;
 
-	if (ucma_init())
+	if (ucma_init_all())
 		goto out;
 
 	devs = malloc(sizeof *devs * (cma_dev_cnt + 1));
@@ -348,7 +407,7 @@ void rdma_destroy_event_channel(struct rdma_event_channel *channel)
 static int ucma_get_device(struct cma_id_private *id_priv, uint64_t guid)
 {
 	struct cma_device *cma_dev;
-	int i, ret = 0;
+	int i, ret;
 
 	for (i = 0; i < cma_dev_cnt; i++) {
 		cma_dev = &cma_dev_array[i];
@@ -359,8 +418,11 @@ static int ucma_get_device(struct cma_id_private *id_priv, uint64_t guid)
 	return ERR(ENODEV);
 match:
 	pthread_mutex_lock(&mut);
+	if ((ret = ucma_init_device(cma_dev)))
+		goto out;
+
 	if (!cma_dev->refcnt++) {
-		cma_dev->pd = ibv_alloc_pd(cma_dev_array[i].verbs);
+		cma_dev->pd = ibv_alloc_pd(cma_dev->verbs);
 		if (!cma_dev->pd) {
 			cma_dev->refcnt--;
 			ret = ERR(ENOMEM);
@@ -378,9 +440,28 @@ out:
 static void ucma_put_device(struct cma_device *cma_dev)
 {
 	pthread_mutex_lock(&mut);
-	if (!--cma_dev->refcnt)
+	if (!--cma_dev->refcnt) {
 		ibv_dealloc_pd(cma_dev->pd);
+		if (cma_dev->xrcd)
+			ibv_close_xrcd(cma_dev->xrcd);
+	}
 	pthread_mutex_unlock(&mut);
+}
+
+static struct ibv_xrcd *ucma_get_xrcd(struct cma_device *cma_dev)
+{
+	struct ibv_xrcd_init_attr attr;
+
+	pthread_mutex_lock(&mut);
+	if (!cma_dev->xrcd) {
+		memset(&attr, 0, sizeof attr);
+		attr.comp_mask = IBV_XRCD_INIT_ATTR_FD | IBV_XRCD_INIT_ATTR_OFLAGS;
+		attr.fd = -1;
+		attr.oflags = O_CREAT;
+		cma_dev->xrcd = ibv_open_xrcd(cma_dev->verbs, &attr);
+	}
+	pthread_mutex_unlock(&mut);
+	return cma_dev->xrcd;
 }
 
 static void ucma_insert_id(struct cma_id_private *id_priv)
@@ -640,11 +721,11 @@ static void ucma_convert_path(struct ibv_path_data *path_data,
 	sa_path->numb_path = 1;
 	sa_path->pkey = path_data->path.pkey;
 	sa_path->sl = ntohs(path_data->path.qosclass_sl) & 0xF;
-	sa_path->mtu_selector = 1;
+	sa_path->mtu_selector = 2;	/* exactly */
 	sa_path->mtu = path_data->path.mtu & 0x1F;
-	sa_path->rate_selector = 1;
+	sa_path->rate_selector = 2;
 	sa_path->rate = path_data->path.rate & 0x1F;
-	sa_path->packet_life_time_selector = 1;
+	sa_path->packet_life_time_selector = 2;
 	sa_path->packet_life_time = path_data->path.packetlifetime & 0x1F;
 
 	sa_path->preference = (uint8_t) path_data->flags;
@@ -659,9 +740,6 @@ static int ucma_query_path(struct rdma_cm_id *id)
 
 	size = sizeof(*resp) + sizeof(struct ibv_path_data) * 6;
 	resp = alloca(size);
-	if (!resp)
-		return ERR(ENOMEM);
-
 	CMA_INIT_CMD_RESP(&cmd, sizeof cmd, QUERY, resp, size);
 	id_priv = container_of(id, struct cma_id_private, id);
 	cmd.id = id_priv->handle;
@@ -1132,17 +1210,26 @@ static int ucma_init_ud_qp(struct cma_id_private *id_priv, struct ibv_qp *qp)
 
 static void ucma_destroy_cqs(struct rdma_cm_id *id)
 {
-	if (id->recv_cq)
+	if (id->qp_type == IBV_QPT_XRC_RECV && id->srq)
+		return;
+
+	if (id->recv_cq) {
 		ibv_destroy_cq(id->recv_cq);
+		if (id->send_cq && (id->send_cq != id->recv_cq)) {
+			ibv_destroy_cq(id->send_cq);
+			id->send_cq = NULL;
+		}
+		id->recv_cq = NULL;
+	}
 
-	if (id->recv_cq_channel)
+	if (id->recv_cq_channel) {
 		ibv_destroy_comp_channel(id->recv_cq_channel);
-
-	if (id->send_cq && (id->send_cq != id->recv_cq))
-		ibv_destroy_cq(id->send_cq);
-
-	if (id->send_cq_channel && (id->send_cq_channel != id->recv_cq_channel))
-		ibv_destroy_comp_channel(id->send_cq_channel);
+		if (id->send_cq_channel && (id->send_cq_channel != id->recv_cq_channel)) {
+			ibv_destroy_comp_channel(id->send_cq_channel);
+			id->send_cq_channel = NULL;
+		}
+		id->recv_cq_channel = NULL;
+	}
 }
 
 static int ucma_create_cqs(struct rdma_cm_id *id, uint32_t send_size, uint32_t recv_size)
@@ -1175,36 +1262,44 @@ err:
 	return ERR(ENOMEM);
 }
 
-int rdma_create_srq(struct rdma_cm_id *id, struct ibv_pd *pd,
-		    struct ibv_srq_init_attr *attr)
+int rdma_create_srq_ex(struct rdma_cm_id *id, struct ibv_srq_init_attr_ex *attr)
 {
+	struct cma_id_private *id_priv;
 	struct ibv_srq *srq;
 	int ret;
 
-	if (!pd)
-		pd = id->pd;
+	id_priv = container_of(id, struct cma_id_private, id);
+	if (!(attr->comp_mask & IBV_SRQ_INIT_ATTR_TYPE))
+		return ERR(EINVAL);
 
-#ifdef IBV_XRC_OPS
+	if (!(attr->comp_mask & IBV_SRQ_INIT_ATTR_PD) || !attr->pd) {
+		attr->pd = id->pd;
+		attr->comp_mask |= IBV_SRQ_INIT_ATTR_PD;
+	}
+
 	if (attr->srq_type == IBV_SRQT_XRC) {
-		if (!attr->ext.xrc.cq) {
+		if (!(attr->comp_mask & IBV_SRQ_INIT_ATTR_XRCD) || !attr->xrcd) {
+			attr->xrcd = ucma_get_xrcd(id_priv->cma_dev);
+			if (!attr->xrcd)
+				return -1;
+		}
+		if (!(attr->comp_mask & IBV_SRQ_INIT_ATTR_CQ) || !attr->cq) {
 			ret = ucma_create_cqs(id, 0, attr->attr.max_wr);
 			if (ret)
 				return ret;
-
-			attr->ext.xrc.cq = id->recv_cq;
+			attr->cq = id->recv_cq;
 		}
+		attr->comp_mask |= IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ;
 	}
 
-	srq = ibv_create_xsrq(pd, attr);
-#else
-	srq = ibv_create_srq(pd, attr);
-#endif
+	srq = ibv_create_srq_ex(id->verbs, attr);
 	if (!srq) {
 		ret = -1;
 		goto err;
 	}
 
-	id->pd = pd;
+	if (!id->pd)
+		id->pd = attr->pd;
 	id->srq = srq;
 	return 0;
 err:
@@ -1212,16 +1307,34 @@ err:
 	return ret;
 }
 
+int rdma_create_srq(struct rdma_cm_id *id, struct ibv_pd *pd,
+		    struct ibv_srq_init_attr *attr)
+{
+	struct ibv_srq_init_attr_ex attr_ex;
+	int ret;
+
+	memcpy(&attr_ex, attr, sizeof *attr);
+	attr_ex.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_PD;
+	if (id->qp_type == IBV_QPT_XRC_RECV) {
+		attr_ex.srq_type = IBV_SRQT_XRC;
+	} else {
+		attr_ex.srq_type = IBV_SRQT_BASIC;
+	}
+	attr_ex.pd = pd;
+	ret = rdma_create_srq_ex(id, &attr_ex);
+	memcpy(attr, &attr_ex, sizeof *attr);
+	return ret;
+}
+
 void rdma_destroy_srq(struct rdma_cm_id *id)
 {
 	ibv_destroy_srq(id->srq);
-	if (!id->qp)
-		ucma_destroy_cqs(id);
 	id->srq = NULL;
+	ucma_destroy_cqs(id);
 }
 
-int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
-		   struct ibv_qp_init_attr *qp_init_attr)
+int rdma_create_qp_ex(struct rdma_cm_id *id,
+		      struct ibv_qp_init_attr_ex *attr)
 {
 	struct cma_id_private *id_priv;
 	struct ibv_qp *qp;
@@ -1231,21 +1344,37 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 		return ERR(EINVAL);
 
 	id_priv = container_of(id, struct cma_id_private, id);
-	if (!pd)
-		pd = id->pd;
-	else if (id->verbs != pd->context)
+	if (!(attr->comp_mask & IBV_QP_INIT_ATTR_PD) || !attr->pd) {
+		attr->comp_mask |= IBV_QP_INIT_ATTR_PD;
+		attr->pd = id->pd;
+	} else if (id->verbs != attr->pd->context)
 		return ERR(EINVAL);
 
-	ret = ucma_create_cqs(id, qp_init_attr->send_cq ? 0 : qp_init_attr->cap.max_send_wr,
-			      qp_init_attr->recv_cq ? 0 : qp_init_attr->cap.max_recv_wr);
+	if ((id->recv_cq && attr->recv_cq && id->recv_cq != attr->recv_cq) ||
+	    (id->send_cq && attr->send_cq && id->send_cq != attr->send_cq))
+		return ERR(EINVAL);
+
+	if (id->qp_type == IBV_QPT_XRC_RECV) {
+		if (!(attr->comp_mask & IBV_QP_INIT_ATTR_XRCD) || !attr->xrcd) {
+			attr->xrcd = ucma_get_xrcd(id_priv->cma_dev);
+			if (!attr->xrcd)
+				return -1;
+			attr->comp_mask |= IBV_QP_INIT_ATTR_XRCD;
+		}
+	}
+
+	ret = ucma_create_cqs(id, attr->send_cq || id->send_cq ? 0 : attr->cap.max_send_wr,
+				  attr->recv_cq || id->recv_cq ? 0 : attr->cap.max_recv_wr);
 	if (ret)
 		return ret;
 
-	if (!qp_init_attr->send_cq)
-		qp_init_attr->send_cq = id->send_cq;
-	if (!qp_init_attr->recv_cq)
-		qp_init_attr->recv_cq = id->recv_cq;
-	qp = ibv_create_qp(pd, qp_init_attr);
+	if (!attr->send_cq)
+		attr->send_cq = id->send_cq;
+	if (!attr->recv_cq)
+		attr->recv_cq = id->recv_cq;
+	if (id->srq && !attr->srq)
+		attr->srq = id->srq;
+	qp = ibv_create_qp_ex(id->verbs, attr);
 	if (!qp) {
 		ret = ERR(ENOMEM);
 		goto err1;
@@ -1258,7 +1387,7 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 	if (ret)
 		goto err2;
 
-	id->pd = pd;
+	id->pd = qp->pd;
 	id->qp = qp;
 	return 0;
 err2:
@@ -1268,11 +1397,25 @@ err1:
 	return ret;
 }
 
+int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
+		   struct ibv_qp_init_attr *qp_init_attr)
+{
+	struct ibv_qp_init_attr_ex attr_ex;
+	int ret;
+
+	memcpy(&attr_ex, qp_init_attr, sizeof *qp_init_attr);
+	attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD;
+	attr_ex.pd = pd ? pd : id->pd;
+	ret = rdma_create_qp_ex(id, &attr_ex);
+	memcpy(qp_init_attr, &attr_ex, sizeof *qp_init_attr);
+	return ret;
+}
+
 void rdma_destroy_qp(struct rdma_cm_id *id)
 {
 	ibv_destroy_qp(id->qp);
-	ucma_destroy_cqs(id);
 	id->qp = NULL;
+	ucma_destroy_cqs(id);
 }
 
 static int ucma_valid_param(struct cma_id_private *id_priv,
@@ -2292,7 +2435,7 @@ int ucma_max_qpsize(struct rdma_cm_id *id)
 	if (id && id_priv->cma_dev) {
 		max_size = id_priv->cma_dev->max_qpsize;
 	} else {
-		ucma_init();
+		ucma_init_all();
 		for (i = 0; i < cma_dev_cnt; i++) {
 			if (!max_size || max_size > cma_dev_array[i].max_qpsize)
 				max_size = cma_dev_array[i].max_qpsize;
