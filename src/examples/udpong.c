@@ -266,7 +266,7 @@ static int svr_bind(void)
 	hints.ai_socktype = SOCK_DGRAM;
  	ret = getaddrinfo(src_addr, port, &hints, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 
@@ -347,7 +347,7 @@ static ssize_t client_recv(struct message *msg, size_t size, int timeout)
 	}
 
 	ret = rs_recv(rs, msg, size, flags | MSG_DONTWAIT);
-	if (ret < 0 && errno != EWOULDBLOCK && errno != EAGAIN)
+	if (ret < 0 && (errno == EWOULDBLOCK || errno == EAGAIN))
 		perror("rrecv");
 
 	return ret;
@@ -411,7 +411,7 @@ static int client_connect(void)
 	hints.ai_socktype = SOCK_DGRAM;
  	ret = getaddrinfo(dst_addr, port, &hints, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 

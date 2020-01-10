@@ -1,7 +1,7 @@
-%define ver 1.1.0
+%define ver 1.0.17
 
 Name: librdmacm
-Version: 1.1.0
+Version: 1.0.17
 Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 

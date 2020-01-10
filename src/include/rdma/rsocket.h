@@ -78,8 +78,7 @@ enum {
 	RDMA_SQSIZE,
 	RDMA_RQSIZE,
 	RDMA_INLINE,
-	RDMA_IOMAPSIZE,
-	RDMA_ROUTE
+	RDMA_IOMAPSIZE
 };
 
 int rsetsockopt(int socket, int level, int optname,

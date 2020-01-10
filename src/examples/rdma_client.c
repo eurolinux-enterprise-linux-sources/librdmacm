@@ -30,7 +30,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <netdb.h>
 #include <errno.h>
 #include <getopt.h>
 #include <rdma/rdma_cma.h>
@@ -40,8 +39,7 @@ static char *server = "127.0.0.1";
 static char *port = "7471";
 
 struct rdma_cm_id *id;
-struct ibv_mr *mr, *send_mr;
-int send_flags;
+struct ibv_mr *mr;
 uint8_t send_msg[16];
 uint8_t recv_msg[16];
 
@@ -56,8 +54,8 @@ static int run(void)
 	hints.ai_port_space = RDMA_PS_TCP;
 	ret = rdma_getaddrinfo(server, port, &hints, &res);
 	if (ret) {
-		printf("rdma_getaddrinfo: %s\n", gai_strerror(ret));
-		goto out;
+		printf("rdma_getaddrinfo %d\n", errno);
+		return ret;
 	}
 
 	memset(&attr, 0, sizeof attr);
@@ -67,76 +65,46 @@ static int run(void)
 	attr.qp_context = id;
 	attr.sq_sig_all = 1;
 	ret = rdma_create_ep(&id, res, NULL, &attr);
-	// Check to see if we got inline data allowed or not
-	if (attr.cap.max_inline_data >= 16)
-		send_flags = IBV_SEND_INLINE;
-	else
-		printf("rdma_client: device doesn't support IBV_SEND_INLINE, "
-		       "using sge sends\n");
-
+	rdma_freeaddrinfo(res);
 	if (ret) {
-		perror("rdma_create_ep");
-		goto out_free_addrinfo;
+		printf("rdma_create_ep %d\n", errno);
+		return ret;
 	}
 
 	mr = rdma_reg_msgs(id, recv_msg, 16);
 	if (!mr) {
-		perror("rdma_reg_msgs for recv_msg");
-		ret = -1;
-		goto out_destroy_ep;
-	}
-	if ((send_flags & IBV_SEND_INLINE) == 0) {
-		send_mr = rdma_reg_msgs(id, send_msg, 16);
-		if (!send_mr) {
-			perror("rdma_reg_msgs for send_msg");
-			ret = -1;
-			goto out_dereg_recv;
-		}
+		printf("rdma_reg_msgs %d\n", errno);
+		return ret;
 	}
 
 	ret = rdma_post_recv(id, NULL, recv_msg, 16, mr);
 	if (ret) {
-		perror("rdma_post_recv");
-		goto out_dereg_send;
+		printf("rdma_post_recv %d\n", errno);
+		return ret;
 	}
 
 	ret = rdma_connect(id, NULL);
 	if (ret) {
-		perror("rdma_connect");
-		goto out_dereg_send;
+		printf("rdma_connect %d\n", errno);
+		return ret;
 	}
 
-	ret = rdma_post_send(id, NULL, send_msg, 16, send_mr, send_flags);
+	ret = rdma_post_send(id, NULL, send_msg, 16, NULL, IBV_SEND_INLINE);
 	if (ret) {
-		perror("rdma_post_send");
-		goto out_disconnect;
+		printf("rdma_post_send %d\n", errno);
+		return ret;
 	}
 
-	while ((ret = rdma_get_send_comp(id, &wc)) == 0);
-	if (ret < 0) {
-		perror("rdma_get_send_comp");
-		goto out_disconnect;
+	ret = rdma_get_recv_comp(id, &wc);
+	if (ret <= 0) {
+		printf("rdma_get_recv_comp %d\n", ret);
+		return ret;
 	}
 
-	while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
-	if (ret < 0)
-		perror("rdma_get_recv_comp");
-	else
-		ret = 0;
-
-out_disconnect:
 	rdma_disconnect(id);
-out_dereg_send:
-	if ((send_flags & IBV_SEND_INLINE) == 0)
-		rdma_dereg_mr(send_mr);
-out_dereg_recv:
 	rdma_dereg_mr(mr);
-out_destroy_ep:
 	rdma_destroy_ep(id);
-out_free_addrinfo:
-	rdma_freeaddrinfo(res);
-out:
-	return ret;
+	return 0;
 }
 
 int main(int argc, char **argv)

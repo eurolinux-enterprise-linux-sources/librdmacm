@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2011-2012 Intel Corporation.  All rights reserved.
- * Copyright (c) 2014-2015 Mellanox Technologies LTD. All rights reserved.
  *
  * This software is available to you under the OpenIB.org BSD license
  * below:
@@ -76,7 +75,6 @@ static struct test_size_param test_size[] = {
 
 static int rs, lrs;
 static int use_async;
-static int use_rgai;
 static int verify;
 static int flags = MSG_DONTWAIT;
 static int poll_timeout = 0;
@@ -88,16 +86,13 @@ static int size_option;
 static int iterations = 1;
 static int transfer_size = 1000;
 static int transfer_count = 1000;
-static int buffer_size, inline_size = 64;
+static int buffer_size;
 static char test_name[10] = "custom";
 static char *port = "7471";
-static int keepalive;
 static char *dst_addr;
 static char *src_addr;
 static struct timeval start, end;
 static void *buf;
-static struct rdma_addrinfo rai_hints;
-static struct addrinfo ai_hints;
 
 static void show_perf(void)
 {
@@ -255,28 +250,6 @@ out:
 	return ret;
 }
 
-static void set_keepalive(int rs)
-{
-	int optval;
-	socklen_t optlen = sizeof(optlen);
-
-	optval = 1;
-	if (rs_setsockopt(rs, SOL_SOCKET, SO_KEEPALIVE, &optval, optlen)) {
-		perror("rsetsockopt SO_KEEPALIVE");
-		return;
-	}
-
-	optval = keepalive;
-	if (rs_setsockopt(rs, IPPROTO_TCP, TCP_KEEPIDLE, &optval, optlen))
-		perror("rsetsockopt TCP_KEEPIDLE");
-
-	if (!(rs_getsockopt(rs, SOL_SOCKET, SO_KEEPALIVE, &optval, &optlen)))
-		printf("Keepalive: %s\n", (optval ? "ON" : "OFF"));
-
-	if (!(rs_getsockopt(rs, IPPROTO_TCP, TCP_KEEPIDLE, &optval, &optlen)))
-		printf("  time: %i\n", optval);
-}
-
 static void set_options(int rs)
 {
 	int val;
@@ -301,38 +274,29 @@ static void set_options(int rs)
 	if (use_rs) {
 		/* Inline size based on experimental data */
 		if (optimization == opt_latency) {
-			rs_setsockopt(rs, SOL_RDMA, RDMA_INLINE, &inline_size,
-				      sizeof inline_size);
+			val = 384;
+			rs_setsockopt(rs, SOL_RDMA, RDMA_INLINE, &val, sizeof val);
 		} else if (optimization == opt_bandwidth) {
 			val = 0;
 			rs_setsockopt(rs, SOL_RDMA, RDMA_INLINE, &val, sizeof val);
 		}
 	}
-
-	if (keepalive)
-		set_keepalive(rs);
 }
 
 static int server_listen(void)
 {
-	struct rdma_addrinfo *rai = NULL;
-	struct addrinfo *ai;
+	struct addrinfo hints, *res;
 	int val, ret;
 
-	if (use_rgai) {
-		rai_hints.ai_flags |= RAI_PASSIVE;
-		ret = rdma_getaddrinfo(src_addr, port, &rai_hints, &rai);
-	} else {
-		ai_hints.ai_flags |= AI_PASSIVE;
-		ret = getaddrinfo(src_addr, port, &ai_hints, &ai);
-	}
+	memset(&hints, 0, sizeof hints);
+	hints.ai_flags = AI_PASSIVE;
+ 	ret = getaddrinfo(src_addr, port, &hints, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 
-	lrs = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0) :
-		    rs_socket(ai->ai_family, SOCK_STREAM, 0);
+	lrs = rs_socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (lrs < 0) {
 		perror("rsocket");
 		ret = lrs;
@@ -346,8 +310,7 @@ static int server_listen(void)
 		goto close;
 	}
 
-	ret = rai ? rs_bind(lrs, rai->ai_src_addr, rai->ai_src_len) :
-		    rs_bind(lrs, ai->ai_addr, ai->ai_addrlen);
+	ret = rs_bind(lrs, res->ai_addr, res->ai_addrlen);
 	if (ret) {
 		perror("rbind");
 		goto close;
@@ -361,10 +324,7 @@ close:
 	if (ret)
 		rs_close(lrs);
 free:
-	if (rai)
-		rdma_freeaddrinfo(rai);
-	else
-		freeaddrinfo(ai);
+	freeaddrinfo(res);
 	return ret;
 }
 
@@ -402,36 +362,18 @@ static int server_connect(void)
 
 static int client_connect(void)
 {
-	struct rdma_addrinfo *rai = NULL, *rai_src = NULL;
-	struct addrinfo *ai, *ai_src;
+	struct addrinfo *res;
 	struct pollfd fds;
 	int ret, err;
 	socklen_t len;
 
-	ret = use_rgai ? rdma_getaddrinfo(dst_addr, port, &rai_hints, &rai) :
-			 getaddrinfo(dst_addr, port, &ai_hints, &ai);
-
+ 	ret = getaddrinfo(dst_addr, port, NULL, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 
-	if (src_addr) {
-		if (use_rgai) {
-			rai_hints.ai_flags |= RAI_PASSIVE;
-			ret = rdma_getaddrinfo(src_addr, port, &rai_hints, &rai_src);
-		} else {
-			ai_hints.ai_flags |= AI_PASSIVE;
-			ret = getaddrinfo(src_addr, port, &ai_hints, &ai_src);
-		}
-		if (ret) {
-			printf("getaddrinfo src_addr: %s\n", gai_strerror(ret));
-			return ret;
-		}
-	}
-
-	rs = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0) :
-		   rs_socket(ai->ai_family, SOCK_STREAM, 0);
+	rs = rs_socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (rs < 0) {
 		perror("rsocket");
 		ret = rs;
@@ -439,27 +381,9 @@ static int client_connect(void)
 	}
 
 	set_options(rs);
+	/* TODO: bind client to src_addr */
 
-	if (src_addr) {
-		ret = rai ? rs_bind(rs, rai_src->ai_src_addr, rai_src->ai_src_len) :
-			    rs_bind(rs, ai_src->ai_addr, ai_src->ai_addrlen);
-		if (ret) {
-			perror("rbind");
-			goto close;
-		}
-	}
-
-	if (rai && rai->ai_route) {
-		ret = rs_setsockopt(rs, SOL_RDMA, RDMA_ROUTE, rai->ai_route,
-				    rai->ai_route_len);
-		if (ret) {
-			perror("rsetsockopt RDMA_ROUTE");
-			goto close;
-		}
-	}
-
-	ret = rai ? rs_connect(rs, rai->ai_dst_addr, rai->ai_dst_len) :
-		    rs_connect(rs, ai->ai_addr, ai->ai_addrlen);
+	ret = rs_connect(rs, res->ai_addr, res->ai_addrlen);
 	if (ret && (errno != EINPROGRESS)) {
 		perror("rconnect");
 		goto close;
@@ -469,10 +393,8 @@ static int client_connect(void)
 		fds.fd = rs;
 		fds.events = POLLOUT;
 		ret = do_poll(&fds, poll_timeout);
-		if (ret) {
-			perror("rpoll");
+		if (ret)
 			goto close;
-		}
 
 		len = sizeof err;
 		ret = rs_getsockopt(rs, SOL_SOCKET, SO_ERROR, &err, &len);
@@ -489,10 +411,7 @@ close:
 	if (ret)
 		rs_close(rs);
 free:
-	if (rai)
-		rdma_freeaddrinfo(rai);
-	else
-		freeaddrinfo(ai);
+	freeaddrinfo(res);
 	return ret;
 }
 
@@ -584,9 +503,6 @@ static int set_test_opt(char *optarg)
 		case 'n':
 			flags |= MSG_DONTWAIT;
 			break;
-		case 'r':
-			use_rgai = 1;
-			break;
 		case 'v':
 			verify = 1;
 			break;
@@ -602,8 +518,6 @@ static int set_test_opt(char *optarg)
 			flags = (flags & ~MSG_DONTWAIT) | MSG_WAITALL;
 		} else if (!strncasecmp("nonblock", optarg, 8)) {
 			flags |= MSG_DONTWAIT;
-		} else if (!strncasecmp("resolve", optarg, 7)) {
-			use_rgai = 1;
 		} else if (!strncasecmp("verify", optarg, 6)) {
 			verify = 1;
 		} else if (!strncasecmp("fork", optarg, 4)) {
@@ -620,9 +534,7 @@ int main(int argc, char **argv)
 {
 	int op, ret;
 
-	ai_hints.ai_socktype = SOCK_STREAM;
-	rai_hints.ai_port_space = RDMA_PS_TCP;
-	while ((op = getopt(argc, argv, "s:b:f:B:i:I:C:S:p:k:T:")) != -1) {
+	while ((op = getopt(argc, argv, "s:b:B:I:C:S:p:T:")) != -1) {
 		switch (op) {
 		case 's':
 			dst_addr = optarg;
@@ -630,22 +542,8 @@ int main(int argc, char **argv)
 		case 'b':
 			src_addr = optarg;
 			break;
-		case 'f':
-			if (!strncasecmp("ip", optarg, 2)) {
-				ai_hints.ai_flags = AI_NUMERICHOST;
-			} else if (!strncasecmp("gid", optarg, 3)) {
-				rai_hints.ai_flags = RAI_NUMERICHOST | RAI_FAMILY;
-				rai_hints.ai_family = AF_IB;
-				use_rgai = 1;
-			} else {
-				fprintf(stderr, "Warning: unknown address format\n");
-			}
-			break;
 		case 'B':
 			buffer_size = atoi(optarg);
-			break;
-		case 'i':
-			inline_size = atoi(optarg);
 			break;
 		case 'I':
 			custom = 1;
@@ -666,9 +564,6 @@ int main(int argc, char **argv)
 		case 'p':
 			port = optarg;
 			break;
-		case 'k':
-			keepalive = atoi(optarg);
-			break;
 		case 'T':
 			if (!set_test_opt(optarg))
 				break;
@@ -677,22 +572,17 @@ int main(int argc, char **argv)
 			printf("usage: %s\n", argv[0]);
 			printf("\t[-s server_address]\n");
 			printf("\t[-b bind_address]\n");
-			printf("\t[-f address_format]\n");
-			printf("\t    name, ip, ipv6, or gid\n");
 			printf("\t[-B buffer_size]\n");
-			printf("\t[-i inline_size]\n");
 			printf("\t[-I iterations]\n");
 			printf("\t[-C transfer_count]\n");
 			printf("\t[-S transfer_size or all]\n");
 			printf("\t[-p port_number]\n");
-			printf("\t[-k keepalive_time]\n");
 			printf("\t[-T test_option]\n");
 			printf("\t    s|sockets - use standard tcp/ip sockets\n");
 			printf("\t    a|async - asynchronous operation (use poll)\n");
 			printf("\t    b|blocking - use blocking calls\n");
 			printf("\t    f|fork - fork server processing\n");
 			printf("\t    n|nonblocking - use nonblocking calls\n");
-			printf("\t    r|resolve - use rdma cm to resolve address\n");
 			printf("\t    v|verify - verify data\n");
 			exit(1);
 		}

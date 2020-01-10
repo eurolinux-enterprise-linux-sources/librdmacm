@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2011-2012 Intel Corporation.  All rights reserved.
- * Copyright (c) 2014 Mellanox Technologies LTD. All rights reserved.
  *
  * This software is available to you under the OpenIB.org BSD license
  * below:
@@ -76,7 +75,6 @@ static struct test_size_param test_size[] = {
 
 static int rs, lrs;
 static int use_async;
-static int use_rgai;
 static int verify;
 static int flags = MSG_DONTWAIT;
 static int poll_timeout = 0;
@@ -86,7 +84,7 @@ static int size_option;
 static int iterations = 1;
 static int transfer_size = 1000;
 static int transfer_count = 1000;
-static int buffer_size, inline_size = 64;
+static int buffer_size;
 static char test_name[10] = "custom";
 static char *port = "7471";
 static char *dst_addr;
@@ -94,8 +92,6 @@ static char *src_addr;
 static struct timeval start, end;
 static void *buf;
 static volatile uint8_t *poll_byte;
-static struct rdma_addrinfo rai_hints;
-static struct addrinfo ai_hints;
 
 static void show_perf(void)
 {
@@ -148,6 +144,9 @@ static int send_msg(int size)
 	struct pollfd fds;
 	int offset, ret;
 
+	if (verify)
+		format_buf(buf, size);
+
 	if (use_async) {
 		fds.fd = rs;
 		fds.events = POLLOUT;
@@ -176,6 +175,9 @@ static int send_xfer(int size)
 {
 	struct pollfd fds;
 	int offset, ret;
+
+	if (verify)
+		format_buf(buf, size - 1);
 
 	if (use_async) {
 		fds.fd = rs;
@@ -225,6 +227,12 @@ static int recv_msg(int size)
 			perror("rrecv");
 			return ret;
 		}
+	}
+
+	if (verify) {
+		ret = verify_buf(buf, size);
+		if (ret)
+			return ret;
 	}
 
 	return 0;
@@ -284,8 +292,6 @@ static int run_test(void)
 					goto out;
 			}
 			*poll_byte = (uint8_t) marker++;
-			if (verify)
-				format_buf(buf, transfer_size - 1);
 			ret = send_xfer(transfer_size);
 			if (ret)
 				goto out;
@@ -302,8 +308,6 @@ static int run_test(void)
 					goto out;
 			}
 			*poll_byte = (uint8_t) marker++;
-			if (verify)
-				format_buf(buf, transfer_size - 1);
 			ret = send_xfer(transfer_size);
 		}
 		if (ret)
@@ -341,8 +345,8 @@ static void set_options(int rs)
 
 	/* Inline size based on experimental data */
 	if (optimization == opt_latency) {
-		rsetsockopt(rs, SOL_RDMA, RDMA_INLINE, &inline_size,
-			    sizeof inline_size);
+		val = 384;
+		rsetsockopt(rs, SOL_RDMA, RDMA_INLINE, &val, sizeof val);
 	} else if (optimization == opt_bandwidth) {
 		val = 0;
 		rsetsockopt(rs, SOL_RDMA, RDMA_INLINE, &val, sizeof val);
@@ -351,24 +355,18 @@ static void set_options(int rs)
 
 static int server_listen(void)
 {
-	struct rdma_addrinfo *rai = NULL;
-	struct addrinfo *ai;
+	struct addrinfo hints, *res;
 	int val, ret;
 
-	if (use_rgai) {
-		rai_hints.ai_flags |= RAI_PASSIVE;
-		ret = rdma_getaddrinfo(src_addr, port, &rai_hints, &rai);
-	} else {
-		ai_hints.ai_flags |= AI_PASSIVE;
-		ret = getaddrinfo(src_addr, port, &ai_hints, &ai);
-	}
+	memset(&hints, 0, sizeof hints);
+	hints.ai_flags = AI_PASSIVE;
+ 	ret = getaddrinfo(src_addr, port, &hints, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 
-	lrs = rai ? rsocket(rai->ai_family, SOCK_STREAM, 0) :
-		    rsocket(ai->ai_family, SOCK_STREAM, 0);
+	lrs = rsocket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (lrs < 0) {
 		perror("rsocket");
 		ret = lrs;
@@ -382,8 +380,7 @@ static int server_listen(void)
 		goto close;
 	}
 
-	ret = rai ? rbind(lrs, rai->ai_src_addr, rai->ai_src_len) :
-		    rbind(lrs, ai->ai_addr, ai->ai_addrlen);
+	ret = rbind(lrs, res->ai_addr, res->ai_addrlen);
 	if (ret) {
 		perror("rbind");
 		goto close;
@@ -397,10 +394,7 @@ close:
 	if (ret)
 		rclose(lrs);
 free:
-	if (rai)
-		rdma_freeaddrinfo(rai);
-	else
-		freeaddrinfo(ai);
+	freeaddrinfo(res);
 	return ret;
 }
 
@@ -435,21 +429,18 @@ static int server_connect(void)
 
 static int client_connect(void)
 {
-	struct rdma_addrinfo *rai = NULL;
-	struct addrinfo *ai;
+	struct addrinfo *res;
 	struct pollfd fds;
 	int ret, err;
 	socklen_t len;
 
-	ret = use_rgai ? rdma_getaddrinfo(dst_addr, port, &rai_hints, &rai) :
-			 getaddrinfo(dst_addr, port, &ai_hints, &ai);
+ 	ret = getaddrinfo(dst_addr, port, NULL, &res);
 	if (ret) {
-		printf("getaddrinfo: %s\n", gai_strerror(ret));
+		perror("getaddrinfo");
 		return ret;
 	}
 
-	rs = rai ? rsocket(rai->ai_family, SOCK_STREAM, 0) :
-		   rsocket(ai->ai_family, SOCK_STREAM, 0);
+	rs = rsocket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (rs < 0) {
 		perror("rsocket");
 		ret = rs;
@@ -459,8 +450,7 @@ static int client_connect(void)
 	set_options(rs);
 	/* TODO: bind client to src_addr */
 
-	ret = rai ? rconnect(rs, rai->ai_dst_addr, rai->ai_dst_len) :
-		    rconnect(rs, ai->ai_addr, ai->ai_addrlen);
+	ret = rconnect(rs, res->ai_addr, res->ai_addrlen);
 	if (ret && (errno != EINPROGRESS)) {
 		perror("rconnect");
 		goto close;
@@ -470,10 +460,8 @@ static int client_connect(void)
 		fds.fd = rs;
 		fds.events = POLLOUT;
 		ret = do_poll(&fds, poll_timeout);
-		if (ret) {
-			perror("rpoll");
+		if (ret)
 			goto close;
-		}
 
 		len = sizeof err;
 		ret = rgetsockopt(rs, SOL_SOCKET, SO_ERROR, &err, &len);
@@ -490,10 +478,7 @@ close:
 	if (ret)
 		rclose(rs);
 free:
-	if (rai)
-		rdma_freeaddrinfo(rai);
-	else
-		freeaddrinfo(ai);
+	freeaddrinfo(res);
 	return ret;
 }
 
@@ -594,9 +579,7 @@ int main(int argc, char **argv)
 {
 	int op, ret;
 
-	ai_hints.ai_socktype = SOCK_STREAM;
-	rai_hints.ai_port_space = RDMA_PS_TCP;
-	while ((op = getopt(argc, argv, "s:b:f:B:i:I:C:S:p:T:")) != -1) {
+	while ((op = getopt(argc, argv, "s:b:B:I:C:S:p:T:")) != -1) {
 		switch (op) {
 		case 's':
 			dst_addr = optarg;
@@ -604,22 +587,8 @@ int main(int argc, char **argv)
 		case 'b':
 			src_addr = optarg;
 			break;
-		case 'f':
-			if (!strncasecmp("ip", optarg, 2)) {
-				ai_hints.ai_flags = AI_NUMERICHOST;
-			} else if (!strncasecmp("gid", optarg, 3)) {
-				rai_hints.ai_flags = RAI_NUMERICHOST | RAI_FAMILY;
-				rai_hints.ai_family = AF_IB;
-				use_rgai = 1;
-			} else {
-				fprintf(stderr, "Warning: unknown address format\n");
-			}
-			break;
 		case 'B':
 			buffer_size = atoi(optarg);
-			break;
-		case 'i':
-			inline_size = atoi(optarg);
 			break;
 		case 'I':
 			custom = 1;
@@ -648,10 +617,7 @@ int main(int argc, char **argv)
 			printf("usage: %s\n", argv[0]);
 			printf("\t[-s server_address]\n");
 			printf("\t[-b bind_address]\n");
-			printf("\t[-f address_format]\n");
-			printf("\t    name, ip, ipv6, or gid\n");
 			printf("\t[-B buffer_size]\n");
-			printf("\t[-i inline_size]\n");
 			printf("\t[-I iterations]\n");
 			printf("\t[-C transfer_count]\n");
 			printf("\t[-S transfer_size or all]\n");

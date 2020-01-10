@@ -39,7 +39,6 @@
 
 #include <rdma/rdma_cma.h>
 #include <rdma/rsocket.h>
-#include <infiniband/ib.h>
 
 #if __BYTE_ORDER == __BIG_ENDIAN
 static inline uint64_t cpu_to_be64(uint64_t x) { return x; }
