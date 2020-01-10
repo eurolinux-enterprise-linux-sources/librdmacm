@@ -1,4 +1,4 @@
-INCLUDES = -I$(srcdir)/include
+AM_CPPFLAGS = -I$(srcdir)/include
 
 rslibdir = $(libdir)/rsocket
 lib_LTLIBRARIES = src/librdmacm.la
@@ -29,7 +29,7 @@ src_librspreload_la_LIBADD = $(top_builddir)/src/librdmacm.la
 bin_PROGRAMS = examples/ucmatose examples/rping examples/udaddy examples/mckey \
 	       examples/rdma_client examples/rdma_server examples/rdma_xclient \
 	       examples/rdma_xserver examples/rstream examples/rcopy \
-	       examples/riostream examples/udpong
+	       examples/riostream examples/udpong examples/cmtime
 examples_ucmatose_SOURCES = examples/cmatose.c examples/common.c
 examples_ucmatose_LDADD = $(top_builddir)/src/librdmacm.la
 examples_rping_SOURCES = examples/rping.c
@@ -54,6 +54,8 @@ examples_rcopy_SOURCES = examples/rcopy.c
 examples_rcopy_LDADD = $(top_builddir)/src/librdmacm.la
 examples_udpong_SOURCES = examples/udpong.c examples/common.c
 examples_udpong_LDADD = $(top_builddir)/src/librdmacm.la
+examples_cmtime_SOURCES = examples/cmtime.c examples/common.c
+examples_cmtime_LDADD = $(top_builddir)/src/librdmacm.la
 
 librdmacmincludedir = $(includedir)/rdma
 infinibandincludedir = $(includedir)/infiniband
@@ -123,6 +125,7 @@ man_MANS = \
 	man/rdma_client.1 \
 	man/rdma_xserver.1 \
 	man/rdma_xclient.1 \
+	man/riostream.1 \
 	man/rstream.1 \
 	man/rcopy.1 \
 	man/rdma_cm.7 \

@@ -1,15 +1,16 @@
+%define _hardened_build 1
+
 Name: librdmacm
-Version: 1.0.17.1
+Version: 1.0.19.1
 Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
 License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
 Source: http://www.openfabrics.org/downloads/rdmacm/%{name}-%{version}.tar.gz
-Patch1: 0001-librdmacm-Check-init-under-mutex.patch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 ExcludeArch: s390 s390x
-BuildRequires: libibverbs-devel > 1.1.4, chrpath, libtool, autoconf
+BuildRequires: libibverbs-devel > 1.1.5 chrpath valgrind-devel ibacm-devel
 
 %description
 librdmacm provides a userspace RDMA Communication Managment API.
@@ -39,17 +40,16 @@ Example test programs for the librdmacm library.
 
 %prep
 %setup -q
-%patch1 -p1
 
 %build
-%configure LDFLAGS=-lpthread
+%configure --with-valgrind
 sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
 sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
-make %{?_smp_mflags} CFLAGS="$CXXFLAGS -fno-strict-aliasing" LDFLAGS="-lpthread"
+make %{?_smp_mflags} CFLAGS="$CXXFLAGS -fno-strict-aliasing" LDFLAGS="$LDFLAGS -lpthread"
 
 %install
 rm -rf %{buildroot}
-%makeinstall
+make DESTDIR=%{buildroot} install
 # remove unpackaged files from the buildroot
 rm -f %{buildroot}%{_libdir}/*.la
 rm -f %{buildroot}%{_libdir}/rsocket/*.la
@@ -87,6 +87,10 @@ rm -rf %{buildroot}
 %{_mandir}/man1/*
 
 %changelog
+* Thu Oct 09 2014 Doug Ledford <dledford@redhat.com> - 1.0.19.1-1
+- Update to latest upstream release
+- Resolves: bz1059133
+
 * Thu Jan 23 2014 Doug Ledford <dledford@redhat.com> - 1.0.17.1-1
 - Update to latest upstream release
 - Resolves: bz978658

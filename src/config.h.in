@@ -1,16 +1,21 @@
-/* config.h.in.  Generated from configure.in by autoheader.  */
-
-/* adding ACM message definition */
-#undef DEFINE_ACM_MSG
+/* config.h.in.  Generated from configure.ac by autoheader.  */
 
 /* Set to 1 to implement atomics */
 #undef DEFINE_ATOMICS
 
-/* adding path record definition */
-#undef DEFINE_PATH_RECORD
+/* Define to 1 if you have the declaration of `O_CLOEXEC', and to 0 if you
+   don't. */
+#undef HAVE_DECL_O_CLOEXEC
+
+/* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
+   don't. */
+#undef HAVE_DECL_SOCK_CLOEXEC
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #undef HAVE_DLFCN_H
+
+/* Define to 1 if you have the <fcntl.h> header file. */
+#undef HAVE_FCNTL_H
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
@@ -36,6 +41,9 @@
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
 
+/* Define to 1 if you have the <sys/socket.h> header file. */
+#undef HAVE_SYS_SOCKET_H
+
 /* Define to 1 if you have the <sys/stat.h> header file. */
 #undef HAVE_SYS_STAT_H
 
@@ -47,6 +55,13 @@
 
 /* Define to 1 to enable valgrind annotations */
 #undef INCLUDE_VALGRIND
+
+/* Define to the sub-directory in which libtool stores uninstalled libraries.
+   */
+#undef LT_OBJDIR
+
+/* Defined to 0 if not provided */
+#undef O_CLOEXEC
 
 /* Name of package */
 #undef PACKAGE
@@ -63,17 +78,23 @@
 /* Define to the one symbol short name of this package. */
 #undef PACKAGE_TARNAME
 
+/* Define to the home page for this package. */
+#undef PACKAGE_URL
+
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
-/* The size of a `long', as computed by sizeof. */
+/* The size of `long', as computed by sizeof. */
 #undef SIZEOF_LONG
+
+/* Defined to 0 if not provided */
+#undef SOCK_CLOEXEC
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
-/* setting IBACM support */
-#undef USE_IB_ACM
+/* fopen() modifier for setting close on exec flag */
+#undef STREAM_CLOEXEC
 
 /* Version number of package */
 #undef VERSION
