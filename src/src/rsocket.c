@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2013 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2008-2014 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -352,7 +352,7 @@ struct rsocket {
 	};
 
 	int		  opts;
-	long		  fd_flags;
+	int		  fd_flags;
 	uint64_t	  so_opts;
 	uint64_t	  ipv6_opts;
 	void		  *optval;
@@ -381,6 +381,7 @@ struct rsocket {
 	dlist_entry	  iomap_list;
 	dlist_entry	  iomap_queue;
 	int		  iomap_pending;
+	int		  unack_cqe;
 };
 
 #define DS_UDP_TAG 0x55555555
@@ -609,7 +610,7 @@ static struct rsocket *rs_alloc(struct rsocket *inherited_rs, int type)
 	return rs;
 }
 
-static int rs_set_nonblocking(struct rsocket *rs, long arg)
+static int rs_set_nonblocking(struct rsocket *rs, int arg)
 {
 	struct ds_qp *qp;
 	int ret = 0;
@@ -838,10 +839,6 @@ static int rs_create_ep(struct rsocket *rs)
 	rs_set_qp_size(rs);
 	if (rs->cm_id->verbs->device->transport_type == IBV_TRANSPORT_IWARP)
 		rs->opts |= RS_OPT_MSG_SEND;
-	ret = rs_init_bufs(rs);
-	if (ret)
-		return ret;
-
 	ret = rs_create_cq(rs, rs->cm_id);
 	if (ret)
 		return ret;
@@ -865,6 +862,10 @@ static int rs_create_ep(struct rsocket *rs)
 	rs->sq_inline = qp_attr.cap.max_inline_data;
 	if ((rs->opts & RS_OPT_MSG_SEND) && (rs->sq_inline < RS_MSG_SIZE))
 		return ERR(ENOTSUP);
+
+	ret = rs_init_bufs(rs);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < rs->rq_size; i++) {
 		ret = rs_post_recv(rs);
@@ -967,9 +968,6 @@ static void rs_free(struct rsocket *rs)
 		return;
 	}
 
-	if (rs->index >= 0)
-		rs_remove(rs);
-
 	if (rs->rmsg)
 		free(rs->rmsg);
 
@@ -993,10 +991,15 @@ static void rs_free(struct rsocket *rs)
 
 	if (rs->cm_id) {
 		rs_free_iomappings(rs);
-		if (rs->cm_id->qp)
+		if (rs->cm_id->qp) {
+			ibv_ack_cq_events(rs->cm_id->recv_cq, rs->unack_cqe);
 			rdma_destroy_qp(rs->cm_id);
+		}
 		rdma_destroy_id(rs->cm_id);
 	}
+
+	if (rs->index >= 0)
+		rs_remove(rs);
 
 	fastlock_destroy(&rs->map_lock);
 	fastlock_destroy(&rs->cq_wait_lock);
@@ -1174,9 +1177,14 @@ int rlisten(int socket, int backlog)
 	rs = idm_lookup(&idm, socket);
 	if (!rs)
 		return ERR(EBADF);
-	ret = rdma_listen(rs->cm_id, backlog);
-	if (!ret)
-		rs->state = rs_listening;
+
+	if (rs->state != rs_listening) {
+		ret = rdma_listen(rs->cm_id, backlog);
+		if (!ret)
+			rs->state = rs_listening;
+	} else {
+		ret = 0;
+	}
 	return ret;
 }
 
@@ -1965,9 +1973,12 @@ static int rs_get_cq_event(struct rsocket *rs)
 
 	ret = ibv_get_cq_event(rs->cm_id->recv_cq_channel, &cq, &context);
 	if (!ret) {
-		ibv_ack_cq_events(rs->cm_id->recv_cq, 1);
+		if (++rs->unack_cqe >= rs->sq_size + rs->rq_size) {
+			ibv_ack_cq_events(rs->cm_id->recv_cq, rs->unack_cqe);
+			rs->unack_cqe = 0;
+		}
 		rs->cq_armed = 0;
-	} else if (errno != EAGAIN) {
+	} else if (!(errno == EAGAIN || errno == EINTR)) {
 		rs->state = rs_error;
 	}
 
@@ -2383,7 +2394,7 @@ ssize_t rrecv(int socket, void *buf, size_t len, int flags)
 	struct rsocket *rs;
 	size_t left = len;
 	uint32_t end_size, rsize;
-	int ret;
+	int ret = 0;
 
 	rs = idm_at(&idm, socket);
 	if (rs->type == SOCK_DGRAM) {
@@ -2410,7 +2421,6 @@ ssize_t rrecv(int socket, void *buf, size_t len, int flags)
 				break;
 		}
 
-		ret = 0;
 		if (flags & MSG_PEEK) {
 			left = len - rs_peek(rs, buf, left);
 			break;
@@ -2445,7 +2455,7 @@ ssize_t rrecv(int socket, void *buf, size_t len, int flags)
 	} while (left && (flags & MSG_WAITALL) && (rs->state & rs_readable));
 
 	fastlock_release(&rs->rlock);
-	return ret ? ret : len - left;
+	return (ret && left == len) ? ret : len - left;
 }
 
 ssize_t rrecvfrom(int socket, void *buf, size_t len, int flags,
@@ -2954,19 +2964,22 @@ check_cq:
 
 	if (rs->state & rs_opening) {
 		ret = rs_do_connect(rs);
-		if (ret) {
-			if (errno == EINPROGRESS) {
-				errno = 0;
-				return 0;
-			} else {
-				return POLLOUT;
-			}
+		if (ret && (errno == EINPROGRESS)) {
+			errno = 0;
+		} else {
+			goto check_cq;
 		}
-		goto check_cq;
 	}
 
-	if (rs->state == rs_connect_error)
-		return (rs->err && events & POLLOUT) ? POLLOUT : 0;
+	if (rs->state == rs_connect_error) {
+		revents = 0;
+		if (events & POLLOUT)
+			revents |= POLLOUT;
+		if (events & POLLIN)
+			revents |= POLLIN;
+		revents |= POLLERR;
+		return revents;
+	}
 
 	return 0;
 }
@@ -3673,7 +3686,7 @@ int rfcntl(int socket, int cmd, ... /* arg */ )
 {
 	struct rsocket *rs;
 	va_list args;
-	long param;
+	int param;
 	int ret = 0;
 
 	rs = idm_lookup(&idm, socket);
@@ -3682,15 +3695,15 @@ int rfcntl(int socket, int cmd, ... /* arg */ )
 	va_start(args, cmd);
 	switch (cmd) {
 	case F_GETFL:
-		ret = (int) rs->fd_flags;
+		ret = rs->fd_flags;
 		break;
 	case F_SETFL:
-		param = va_arg(args, long);
-		if (param & O_NONBLOCK)
-			ret = rs_set_nonblocking(rs, O_NONBLOCK);
+		param = va_arg(args, int);
+		if ((rs->fd_flags & O_NONBLOCK) != (param & O_NONBLOCK))
+			ret = rs_set_nonblocking(rs, param & O_NONBLOCK);
 
 		if (!ret)
-			rs->fd_flags |= param;
+			rs->fd_flags = param;
 		break;
 	default:
 		ret = ERR(ENOTSUP);

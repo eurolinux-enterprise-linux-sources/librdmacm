@@ -1,7 +1,7 @@
 %define _hardened_build 1
 
 Name: librdmacm
-Version: 1.0.19.1
+Version: 1.0.21
 Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
@@ -9,8 +9,10 @@ License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
 Source: http://www.openfabrics.org/downloads/rdmacm/%{name}-%{version}.tar.gz
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
-ExcludeArch: s390 s390x
-BuildRequires: libibverbs-devel > 1.1.5 chrpath valgrind-devel ibacm-devel
+BuildRequires: libibverbs-devel > 1.1.5 chrpath ibacm-devel
+%ifnarch ia64 %{sparc} s390 s390x
+BuildRequires: valgrind-devel
+%endif
 
 %description
 librdmacm provides a userspace RDMA Communication Managment API.
@@ -42,7 +44,11 @@ Example test programs for the librdmacm library.
 %setup -q
 
 %build
+%ifnarch ia64 %{sparc} s390 s390x
 %configure --with-valgrind
+%else
+%configure
+%endif
 sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
 sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
 make %{?_smp_mflags} CFLAGS="$CXXFLAGS -fno-strict-aliasing" LDFLAGS="$LDFLAGS -lpthread"
@@ -87,6 +93,11 @@ rm -rf %{buildroot}
 %{_mandir}/man1/*
 
 %changelog
+* Fri Jun 05 2015 Doug Ledford <dledford@redhat.com> - 1.0.21-1
+- Update to latest upstream release
+- Build on s390
+- Related: bz1186159
+
 * Thu Oct 09 2014 Doug Ledford <dledford@redhat.com> - 1.0.19.1-1
 - Update to latest upstream release
 - Resolves: bz1059133
