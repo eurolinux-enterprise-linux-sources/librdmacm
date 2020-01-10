@@ -1,11 +1,12 @@
 Name: librdmacm
-Version: 1.0.17
+Version: 1.0.17.1
 Release: 1%{?dist}
 Summary: Userspace RDMA Connection Manager
 Group: System Environment/Libraries
 License: GPLv2 or BSD
 Url: http://www.openfabrics.org/
 Source: http://www.openfabrics.org/downloads/rdmacm/%{name}-%{version}.tar.gz
+Patch1: 0001-librdmacm-Check-init-under-mutex.patch
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 ExcludeArch: s390 s390x
 BuildRequires: libibverbs-devel > 1.1.4, chrpath, libtool, autoconf
@@ -38,6 +39,7 @@ Example test programs for the librdmacm library.
 
 %prep
 %setup -q
+%patch1 -p1
 
 %build
 %configure LDFLAGS=-lpthread
@@ -85,6 +87,13 @@ rm -rf %{buildroot}
 %{_mandir}/man1/*
 
 %changelog
+* Thu Jan 23 2014 Doug Ledford <dledford@redhat.com> - 1.0.17.1-1
+- Update to latest upstream release
+- Resolves: bz978658
+
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 1.0.17-2
+- Mass rebuild 2013-12-27
+
 * Mon Mar 25 2013 Doug Ledford <dledford@redhat.com> - 1.0.17-1
 - Grab actual upstream release 1.0.17 now that it's available
 
