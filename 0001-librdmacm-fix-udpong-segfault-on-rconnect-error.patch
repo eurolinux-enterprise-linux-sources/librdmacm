@@ -1,0 +1,40 @@
+From 2fd5322db77c0b1ff441169682e1531b0bfbae4e Mon Sep 17 00:00:00 2001
+From: Jarod Wilson <jarod@redhat.com>
+Date: Wed, 22 Jun 2016 09:12:28 -0400
+Subject: [PATCH librdmacm] fix udpong segfault on rconnect error
+
+Before patch:
+[root@rdma-qe-05 librdmacm (master *)]$ udpong -s 172.31.45.4
+name      bytes   xfers   total       time     Gb/sec    usec/xfer
+rconnect: No such file or directory
+Segmentation fault (core dumped)
+
+After patch:
+[root@rdma-qe-05 librdmacm (master *)]$ ./examples/udpong -s 172.31.45.4
+name      bytes   xfers   total       time     Gb/sec    usec/xfer
+rconnect: No such file or directory
+
+Simple fix, just a missing goto on error, so we don't try to do things
+that are already expected to fail.
+
+CC: Sean Hefty <sean.hefty@intel.com>
+Signed-off-by: Jarod Wilson <jarod@redhat.com>
+---
+ examples/udpong.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/examples/udpong.c b/examples/udpong.c
+index 97713a2..6affc62 100644
+--- a/examples/udpong.c
++++ b/examples/udpong.c
+@@ -427,6 +427,7 @@ static int client_connect(void)
+ 	if (ret) {
+ 		perror("rconnect");
+ 		rs_close(rs);
++		goto out;
+ 	}
+ 
+ 	msg.op = msg_op_login;
+-- 
+1.8.3.1
+
